@@ -18,6 +18,8 @@
     <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://apis.google.com/js/api.js"></script>
     <style>
         body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif; }
         @keyframes sparkle { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
@@ -88,16 +90,27 @@
             { id: 'personal', name: 'Personal', emoji: '🎯', color: 'bg-green-100 text-green-700 border-green-300' }
         ];
 
+        // Google Calendar Configuration - IMPORTANT: Replace with your own Client ID
+        const GOOGLE_CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com';
+        const SCOPES = 'https://www.googleapis.com/auth/calendar.events';
+
+        // Backend API URL
+        const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+          ? 'http://localhost:3001'
+          : 'https://your-backend-server.com'; // Replace with your deployed backend URL
+
         function SparkApp() {
           const [view, setView] = useState('main'); // main, vault, roles
           const [task, setTask] = useState('');
           const [duration, setDuration] = useState('1');
           const [priority, setPriority] = useState('medium');
-          const [selectedRole, setSelectedRole] = useState(ROLES[0]);
+          const [selectedRoles, setSelectedRoles] = useState([ROLES[0]]);
           const [analyzing, setAnalyzing] = useState(false);
           const [suggestions, setSuggestions] = useState(null);
           const [vaultItems, setVaultItems] = useState([]);
           const [showRoleSetup, setShowRoleSetup] = useState(false);
+          const [googleSignedIn, setGoogleSignedIn] = useState(false);
+          const [accessToken, setAccessToken] = useState(null);
 
           // Load vault from localStorage
           useEffect(() => {
@@ -107,13 +120,107 @@
             }
           }, []);
 
+          // Initialize Google Calendar API
+          useEffect(() => {
+            const initGoogleAPI = () => {
+              if (typeof google !== 'undefined' && typeof gapi !== 'undefined') {
+                gapi.load('client', () => {
+                  gapi.client.init({
+                    apiKey: '',
+                    discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest'],
+                  });
+                });
+              }
+            };
+
+            if (document.readyState === 'complete') {
+              initGoogleAPI();
+            } else {
+              window.addEventListener('load', initGoogleAPI);
+              return () => window.removeEventListener('load', initGoogleAPI);
+            }
+          }, []);
+
+          const handleGoogleSignIn = () => {
+            const client = google.accounts.oauth2.initTokenClient({
+              client_id: GOOGLE_CLIENT_ID,
+              scope: SCOPES,
+              callback: (response) => {
+                if (response.access_token) {
+                  setAccessToken(response.access_token);
+                  setGoogleSignedIn(true);
+                  gapi.client.setToken({ access_token: response.access_token });
+                }
+              },
+            });
+            client.requestAccessToken();
+          };
+
+          const handleGoogleSignOut = () => {
+            google.accounts.oauth2.revoke(accessToken, () => {
+              setAccessToken(null);
+              setGoogleSignedIn(false);
+              gapi.client.setToken(null);
+            });
+          };
+
+          const createGoogleCalendarEvent = async (startTime, endTime) => {
+            if (!googleSignedIn || !accessToken) {
+              alert('Please sign in with Google Calendar first!');
+              return;
+            }
+
+            const roleText = selectedRoles.map(r => r.emoji).join(' ');
+            const roleNames = selectedRoles.map(r => r.name).join(', ');
+
+            const event = {
+              summary: `${roleText} ${task}`,
+              description: `Roles: ${roleNames}\nPriority: ${priority}\n\nCreated by Spark ⚡\nhttps://imalexgu.github.io/ai-scheduler/`,
+              start: {
+                dateTime: startTime.toISOString(),
+                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              },
+              end: {
+                dateTime: endTime.toISOString(),
+                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              },
+            };
+
+            try {
+              const response = await gapi.client.calendar.events.insert({
+                calendarId: 'primary',
+                resource: event,
+              });
+
+              alert('✅ Event created successfully in your Google Calendar!');
+              resetForm();
+              return response;
+            } catch (error) {
+              console.error('Error creating event:', error);
+              alert('❌ Failed to create event. Please try again.');
+            }
+          };
+
+          const toggleRole = (role) => {
+            setSelectedRoles(prev => {
+              const exists = prev.find(r => r.id === role.id);
+              if (exists) {
+                // Must keep at least one role selected
+                if (prev.length === 1) return prev;
+                return prev.filter(r => r.id !== role.id);
+              } else {
+                return [...prev, role];
+              }
+            });
+          };
+
           const saveToVault = () => {
             const newItem = {
               id: Date.now(),
               task,
               duration,
               priority,
-              role: selectedRole,
+              roles: selectedRoles,
               addedDate: new Date().toISOString()
             };
             const updated = [...vaultItems, newItem];
@@ -133,7 +240,7 @@
             setTask(item.task);
             setDuration(item.duration);
             setPriority(item.priority);
-            setSelectedRole(item.role);
+            setSelectedRoles(item.roles || [item.role] || [ROLES[0]]);
             setView('main');
             deleteFromVault(item.id);
           };
@@ -144,71 +251,111 @@
               const now = new Date();
               const durationMinutes = parseFloat(duration) * 60;
               const endTime = new Date(now.getTime() + durationMinutes * 60 * 1000);
-              
-              // Generate calendar link immediately for "Do Now"
-              const formatDateTime = (date) => {
-                return date.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-              };
-              
-              const params = new URLSearchParams({
-                action: 'TEMPLATE',
-                text: `${selectedRole.emoji} ${task}`,
-                dates: `${formatDateTime(now)}/${formatDateTime(endTime)}`,
-                details: `Role: ${selectedRole.name}\nPriority: Do Now!\n\nCreated by Spark ⚡\nhttps://imalexgu.github.io/ai-scheduler/`,
-                location: ''
-              });
-              
-              const calendarLink = `https://calendar.google.com/calendar/render?${params.toString()}`;
-              window.open(calendarLink, '_blank');
-              
-              // Show confirmation message
-              alert('⚡ Ready to go!\n\nOpening Google Calendar to block your time right now.\n\nLet\'s do this!');
-              resetForm();
+
+              if (googleSignedIn) {
+                // Use real API to create event
+                await createGoogleCalendarEvent(now, endTime);
+              } else {
+                // Fallback to calendar link if not signed in
+                const formatDateTime = (date) => {
+                  return date.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+                };
+
+                const roleText = selectedRoles.map(r => r.emoji).join(' ');
+                const roleNames = selectedRoles.map(r => r.name).join(', ');
+                const params = new URLSearchParams({
+                  action: 'TEMPLATE',
+                  text: `${roleText} ${task}`,
+                  dates: `${formatDateTime(now)}/${formatDateTime(endTime)}`,
+                  details: `Roles: ${roleNames}\nPriority: Do Now!\n\nCreated by Spark ⚡\nhttps://imalexgu.github.io/ai-scheduler/`,
+                  location: ''
+                });
+
+                const calendarLink = `https://calendar.google.com/calendar/render?${params.toString()}`;
+                window.open(calendarLink, '_blank');
+
+                alert('⚡ Ready to go!\n\nOpening Google Calendar to block your time right now.\n\nLet\'s do this!');
+                resetForm();
+              }
               return;
             }
 
             // Normal flow for other priorities
             setAnalyzing(true);
-            
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            const now = new Date();
-            const suggestions = [];
-            
-            const tomorrow9am = new Date(now);
-            tomorrow9am.setDate(tomorrow9am.getDate() + 1);
-            tomorrow9am.setHours(9, 0, 0, 0);
-            
-            suggestions.push({
-              time: tomorrow9am,
-              reason: `Optimal for ${selectedRole.name} tasks - morning energy peak, no conflicts`,
-              score: 95,
-              roleMatch: true
-            });
-            
-            const today2pm = new Date(now);
-            today2pm.setHours(14, 0, 0, 0);
-            if (today2pm > now) {
+
+            try {
+              // Call Claude API through backend
+              const response = await fetch(`${API_URL}/api/analyze-task`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  task,
+                  duration,
+                  priority,
+                  roles: selectedRoles,
+                  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+                })
+              });
+
+              if (!response.ok) {
+                throw new Error('Failed to get AI suggestions');
+              }
+
+              const data = await response.json();
+              const suggestions = data.suggestions.map(s => ({
+                ...s,
+                time: new Date(s.time)
+              }));
+
+              setSuggestions(suggestions);
+
+            } catch (error) {
+              console.error('Error getting AI suggestions:', error);
+
+              // Fallback to demo mode if API fails
+              const now = new Date();
+              const suggestions = [];
+
+              const tomorrow9am = new Date(now);
+              tomorrow9am.setDate(tomorrow9am.getDate() + 1);
+              tomorrow9am.setHours(9, 0, 0, 0);
+
+              const roleNames = selectedRoles.map(r => r.name).join(' & ');
               suggestions.push({
-                time: today2pm,
-                reason: 'Available today, good productivity window',
-                score: 85,
+                time: tomorrow9am,
+                reason: `Optimal for ${roleNames} tasks - morning energy peak, no conflicts`,
+                score: 95,
                 roleMatch: true
               });
+
+              const today2pm = new Date(now);
+              today2pm.setHours(14, 0, 0, 0);
+              if (today2pm > now) {
+                suggestions.push({
+                  time: today2pm,
+                  reason: 'Available today, good productivity window',
+                  score: 85,
+                  roleMatch: true
+                });
+              }
+
+              const dayAfter10am = new Date(now);
+              dayAfter10am.setDate(dayAfter10am.getDate() + 2);
+              dayAfter10am.setHours(10, 0, 0, 0);
+
+              suggestions.push({
+                time: dayAfter10am,
+                reason: 'Extra time to prepare, flexible schedule',
+                score: 80,
+                roleMatch: false
+              });
+
+              setSuggestions(suggestions);
+              alert('⚠️ Using demo mode. Connect backend server for AI-powered suggestions.');
             }
-            
-            const dayAfter10am = new Date(now);
-            dayAfter10am.setDate(dayAfter10am.getDate() + 2);
-            dayAfter10am.setHours(10, 0, 0, 0);
-            
-            suggestions.push({
-              time: dayAfter10am,
-              reason: 'Extra time to prepare, flexible schedule',
-              score: 80,
-              roleMatch: false
-            });
-            
-            setSuggestions(suggestions);
+
             setAnalyzing(false);
           };
 
@@ -217,19 +364,21 @@
             // Fix: Convert duration string to number and multiply by 60 for minutes
             const durationMinutes = parseFloat(duration) * 60;
             const endTime = new Date(startTime.getTime() + durationMinutes * 60 * 1000);
-            
+
             const formatDateTime = (date) => {
               return date.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
             };
-            
+
+            const roleText = selectedRoles.map(r => r.emoji).join(' ');
+            const roleNames = selectedRoles.map(r => r.name).join(', ');
             const params = new URLSearchParams({
               action: 'TEMPLATE',
-              text: `${selectedRole.emoji} ${task}`,
+              text: `${roleText} ${task}`,
               dates: `${formatDateTime(startTime)}/${formatDateTime(endTime)}`,
-              details: `Role: ${selectedRole.name}\nPriority: ${priority}\n\nCreated by Spark ⚡\nhttps://imalexgu.github.io/ai-scheduler/`,
+              details: `Roles: ${roleNames}\nPriority: ${priority}\n\nCreated by Spark ⚡\nhttps://imalexgu.github.io/ai-scheduler/`,
               location: ''
             });
-            
+
             return `https://calendar.google.com/calendar/render?${params.toString()}`;
           };
 
@@ -301,6 +450,23 @@
                             </span>
                           )}
                         </button>
+                        {googleSignedIn ? (
+                          <button
+                            onClick={handleGoogleSignOut}
+                            className="px-3 py-1.5 bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition text-sm font-medium"
+                            title="Google Calendar Connected"
+                          >
+                            ✓ Google
+                          </button>
+                        ) : (
+                          <button
+                            onClick={handleGoogleSignIn}
+                            className="px-3 py-1.5 bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 transition text-sm font-medium"
+                            title="Connect Google Calendar"
+                          >
+                            Login Google
+                          </button>
+                        )}
                         <button
                           onClick={shareOnTwitter}
                           className="p-2 hover:bg-blue-50 rounded-lg transition text-blue-500"
@@ -318,23 +484,26 @@
                       {/* Role Selection */}
                       <div>
                         <label className="block text-sm font-semibold text-gray-700 mb-2">
-                          🎭 Which role is this for?
+                          🎭 Which role(s) is this for? (可多选)
                         </label>
                         <div className="flex flex-wrap gap-2">
-                          {ROLES.map(role => (
-                            <button
-                              key={role.id}
-                              onClick={() => setSelectedRole(role)}
-                              className={`px-4 py-2 rounded-xl border-2 transition-all ${
-                                selectedRole.id === role.id
-                                  ? role.color + ' scale-105 shadow-md'
-                                  : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
-                              }`}
-                            >
-                              <span className="mr-2">{role.emoji}</span>
-                              {role.name}
-                            </button>
-                          ))}
+                          {ROLES.map(role => {
+                            const isSelected = selectedRoles.find(r => r.id === role.id);
+                            return (
+                              <button
+                                key={role.id}
+                                onClick={() => toggleRole(role)}
+                                className={`px-4 py-2 rounded-xl border-2 transition-all ${
+                                  isSelected
+                                    ? role.color + ' scale-105 shadow-md'
+                                    : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+                                }`}
+                              >
+                                <span className="mr-2">{role.emoji}</span>
+                                {role.name}
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
 
@@ -363,6 +532,8 @@
                             onChange={(e) => setDuration(e.target.value)}
                             className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                           >
+                            <option value="0.083">5 minutes</option>
+                            <option value="0.167">10 minutes</option>
                             <option value="0.5">30 minutes</option>
                             <option value="1">1 hour</option>
                             <option value="1.5">1.5 hours</option>
@@ -505,10 +676,12 @@
                                 </div>
                               </div>
 
-                              <div className="flex items-center gap-2 mb-3">
-                                <span className={`px-3 py-1 rounded-full text-sm ${selectedRole.color}`}>
-                                  {selectedRole.emoji} {selectedRole.name}
-                                </span>
+                              <div className="flex items-center gap-2 mb-3 flex-wrap">
+                                {selectedRoles.map(role => (
+                                  <span key={role.id} className={`px-3 py-1 rounded-full text-sm ${role.color}`}>
+                                    {role.emoji} {role.name}
+                                  </span>
+                                ))}
                               </div>
 
                               <p className="text-gray-600 mb-4 flex items-center gap-2">
@@ -516,21 +689,42 @@
                                 {suggestion.reason}
                               </p>
 
-                              <a
-                                href={generateCalendarLink(suggestion)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className={`block w-full py-3 rounded-xl font-semibold text-center transition-all ${
-                                  idx === 0
-                                    ? 'bg-green-500 text-white hover:bg-green-600 shadow-md hover:shadow-lg'
-                                    : 'bg-purple-500 text-white hover:bg-purple-600'
-                                }`}
-                              >
-                                <span className="flex items-center justify-center gap-2">
-                                  <CheckCircle size={20} />
-                                  Commit This Time
-                                </span>
-                              </a>
+                              {googleSignedIn ? (
+                                <button
+                                  onClick={async () => {
+                                    const startTime = suggestion.time;
+                                    const durationMinutes = parseFloat(duration) * 60;
+                                    const endTime = new Date(startTime.getTime() + durationMinutes * 60 * 1000);
+                                    await createGoogleCalendarEvent(startTime, endTime);
+                                  }}
+                                  className={`w-full py-3 rounded-xl font-semibold text-center transition-all ${
+                                    idx === 0
+                                      ? 'bg-green-500 text-white hover:bg-green-600 shadow-md hover:shadow-lg'
+                                      : 'bg-purple-500 text-white hover:bg-purple-600'
+                                  }`}
+                                >
+                                  <span className="flex items-center justify-center gap-2">
+                                    <CheckCircle size={20} />
+                                    Add to Calendar
+                                  </span>
+                                </button>
+                              ) : (
+                                <a
+                                  href={generateCalendarLink(suggestion)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className={`block w-full py-3 rounded-xl font-semibold text-center transition-all ${
+                                    idx === 0
+                                      ? 'bg-green-500 text-white hover:bg-green-600 shadow-md hover:shadow-lg'
+                                      : 'bg-purple-500 text-white hover:bg-purple-600'
+                                  }`}
+                                >
+                                  <span className="flex items-center justify-center gap-2">
+                                    <CheckCircle size={20} />
+                                    Open Calendar Link
+                                  </span>
+                                </a>
+                              )}
                             </div>
                           );
                         })}
@@ -601,10 +795,12 @@
                             <div key={item.id} className="border-2 border-gray-200 rounded-xl p-4 hover:border-purple-300 transition">
                               <div className="flex items-start justify-between mb-2">
                                 <div className="flex-1">
-                                  <div className="flex items-center gap-2 mb-2">
-                                    <span className={`px-3 py-1 rounded-full text-sm ${item.role.color}`}>
-                                      {item.role.emoji} {item.role.name}
-                                    </span>
+                                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                                    {(item.roles || [item.role]).map((role, idx) => (
+                                      <span key={idx} className={`px-3 py-1 rounded-full text-sm ${role.color}`}>
+                                        {role.emoji} {role.name}
+                                      </span>
+                                    ))}
                                   </div>
                                   <p className="text-gray-800 font-medium">{item.task}</p>
                                   <p className="text-sm text-gray-500">
