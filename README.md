@@ -13,13 +13,16 @@ Built an AI Task Scheduler that helps you manage tasks across different life rol
 
 ### V3.0 - Latest Updates (2026)
 
-✅ **Multi-Role Support** - Tag tasks with multiple roles (Mom + Therapist + Creator)
-✅ **Short Time Blocks** - Added 5-minute and 10-minute options
+✅ **Custom Roles** - Create unlimited custom roles with emoji icons
+✅ **Monthly Statistics** - Visual dashboard showing time distribution and task counts
+✅ **AI-Powered Insights** - Keyword extraction, user profiling, and personalized recommendations
+✅ **Task History** - Automatic tracking of all completed tasks
+✅ **Settings Panel** - Easy configuration of Claude API key and preferences
 ✅ **Real Google Calendar Integration** - OAuth login + direct event creation
-✅ **Claude AI Analysis** - Smart time suggestions based on task context
+✅ **Calendar Conflict Detection** - Reads your calendar and suggests times that don't conflict
 ✅ **Spark Vault** - Save ideas you're not ready to commit to yet
 ✅ **"Do It Now" Mode** - Instantly block time on your calendar
-✅ **Cloud Sync Ready** - Firebase integration for cross-device access
+✅ **Smart Time Suggestions** - 3 AI-suggested optimal times for each task
 
 ### Previous Versions
 

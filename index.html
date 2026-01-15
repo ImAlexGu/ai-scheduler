@@ -113,7 +113,7 @@
 
         // Google Calendar Configuration
         const GOOGLE_CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com';
-        const SCOPES = 'https://www.googleapis.com/auth/calendar.events';
+        const SCOPES = 'https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.readonly';
 
         // Backend API URL
         const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
@@ -262,6 +262,43 @@
             }
           };
 
+          const getCalendarEvents = async (timeMin, timeMax) => {
+            if (!googleSignedIn || !accessToken) {
+              return [];
+            }
+
+            try {
+              const response = await gapi.client.calendar.events.list({
+                calendarId: 'primary',
+                timeMin: timeMin.toISOString(),
+                timeMax: timeMax.toISOString(),
+                singleEvents: true,
+                orderBy: 'startTime',
+              });
+
+              return response.result.items || [];
+            } catch (error) {
+              console.error('Error reading calendar events:', error);
+              return [];
+            }
+          };
+
+          const checkConflict = (suggestedStart, suggestedEnd, existingEvents) => {
+            for (const event of existingEvents) {
+              const eventStart = new Date(event.start.dateTime || event.start.date);
+              const eventEnd = new Date(event.end.dateTime || event.end.date);
+
+              // Check if there's any overlap
+              if (suggestedStart < eventEnd && suggestedEnd > eventStart) {
+                return {
+                  hasConflict: true,
+                  conflictingEvent: event.summary
+                };
+              }
+            }
+            return { hasConflict: false };
+          };
+
           const addCustomRole = () => {
             if (!newRoleName.trim()) {
               alert('Please enter a role name');
@@ -386,6 +423,14 @@
 
             setAnalyzing(true);
 
+            // Fetch existing calendar events if signed in
+            let existingEvents = [];
+            if (googleSignedIn && accessToken) {
+              const now = new Date();
+              const weekLater = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+              existingEvents = await getCalendarEvents(now, weekLater);
+            }
+
             try {
               const response = await fetch(`${API_URL}/api/analyze-task`, {
                 method: 'POST',
@@ -402,10 +447,31 @@
               if (!response.ok) throw new Error('Failed to get AI suggestions');
 
               const data = await response.json();
-              const suggestions = data.suggestions.map(s => ({
+              let suggestions = data.suggestions.map(s => ({
                 ...s,
                 time: new Date(s.time)
               }));
+
+              // Filter out conflicting times if we have calendar access
+              if (existingEvents.length > 0) {
+                const durationMs = parseFloat(duration) * 60 * 60 * 1000;
+                suggestions = suggestions.map(suggestion => {
+                  const startTime = suggestion.time;
+                  const endTime = new Date(startTime.getTime() + durationMs);
+                  const conflict = checkConflict(startTime, endTime, existingEvents);
+
+                  return {
+                    ...suggestion,
+                    hasConflict: conflict.hasConflict,
+                    conflictingEvent: conflict.conflictingEvent
+                  };
+                });
+
+                // Prioritize non-conflicting suggestions
+                const nonConflicting = suggestions.filter(s => !s.hasConflict);
+                const conflicting = suggestions.filter(s => s.hasConflict);
+                suggestions = [...nonConflicting, ...conflicting];
+              }
 
               setSuggestions(suggestions.slice(0, 3));
 
@@ -413,42 +479,51 @@
               console.error('Error getting AI suggestions:', error);
 
               const now = new Date();
+              const durationMs = parseFloat(duration) * 60 * 60 * 1000;
               const suggestions = [];
 
-              const tomorrow9am = new Date(now);
-              tomorrow9am.setDate(tomorrow9am.getDate() + 1);
-              tomorrow9am.setHours(9, 0, 0, 0);
+              // Generate default suggestions
+              const defaultTimes = [
+                { offset: 1, hour: 9, reason: `Optimal for ${selectedRole.name} tasks - morning energy peak`, score: 95 },
+                { offset: 0, hour: 14, reason: 'Available today, good productivity window', score: 85 },
+                { offset: 2, hour: 10, reason: 'Extra time to prepare, flexible schedule', score: 80 },
+                { offset: 1, hour: 14, reason: 'Tomorrow afternoon, productive time', score: 82 },
+                { offset: 3, hour: 9, reason: 'Later in the week, flexible timing', score: 78 }
+              ];
 
-              suggestions.push({
-                time: tomorrow9am,
-                reason: `Optimal for ${selectedRole.name} tasks - morning energy peak`,
-                score: 95,
-                roleMatch: true
-              });
+              for (const timeSlot of defaultTimes) {
+                const suggestedTime = new Date(now);
+                suggestedTime.setDate(suggestedTime.getDate() + timeSlot.offset);
+                suggestedTime.setHours(timeSlot.hour, 0, 0, 0);
 
-              const today2pm = new Date(now);
-              today2pm.setHours(14, 0, 0, 0);
-              if (today2pm > now) {
+                // Skip if time is in the past
+                if (suggestedTime <= now) continue;
+
+                const endTime = new Date(suggestedTime.getTime() + durationMs);
+                const conflict = existingEvents.length > 0
+                  ? checkConflict(suggestedTime, endTime, existingEvents)
+                  : { hasConflict: false };
+
                 suggestions.push({
-                  time: today2pm,
-                  reason: 'Available today, good productivity window',
-                  score: 85,
-                  roleMatch: true
+                  time: suggestedTime,
+                  reason: timeSlot.reason,
+                  score: timeSlot.score,
+                  roleMatch: timeSlot.score >= 85,
+                  hasConflict: conflict.hasConflict,
+                  conflictingEvent: conflict.conflictingEvent
                 });
+
+                // Stop once we have 3 non-conflicting suggestions
+                const nonConflicting = suggestions.filter(s => !s.hasConflict);
+                if (nonConflicting.length >= 3) break;
               }
 
-              const dayAfter10am = new Date(now);
-              dayAfter10am.setDate(dayAfter10am.getDate() + 2);
-              dayAfter10am.setHours(10, 0, 0, 0);
+              // Prioritize non-conflicting suggestions
+              const nonConflicting = suggestions.filter(s => !s.hasConflict);
+              const conflicting = suggestions.filter(s => s.hasConflict);
+              const finalSuggestions = [...nonConflicting, ...conflicting].slice(0, 3);
 
-              suggestions.push({
-                time: dayAfter10am,
-                reason: 'Extra time to prepare, flexible schedule',
-                score: 80,
-                roleMatch: false
-              });
-
-              setSuggestions(suggestions.slice(0, 3));
+              setSuggestions(finalSuggestions);
             }
 
             setAnalyzing(false);
@@ -802,6 +877,12 @@
                             <strong>💡 Psychology Tip:</strong> Research shows that committing to a specific time
                             increases follow-through by 70%. Choose your time and commit!
                           </p>
+                          {googleSignedIn && (
+                            <p className="text-xs text-green-700 mt-2 flex items-center gap-1">
+                              <CheckCircle size={14} />
+                              Calendar conflict detection active - suggestions avoid your busy times
+                            </p>
+                          )}
                         </div>
 
                         {suggestions.map((suggestion, idx) => {
@@ -855,6 +936,17 @@
                                 <span className="text-blue-500">💡</span>
                                 {suggestion.reason}
                               </p>
+
+                              {suggestion.hasConflict && (
+                                <div className="mb-4 p-3 bg-yellow-50 border-l-4 border-yellow-400 rounded">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-yellow-600 font-semibold">⚠️ Calendar Conflict</span>
+                                  </div>
+                                  <p className="text-sm text-yellow-700 mt-1">
+                                    Conflicts with: {suggestion.conflictingEvent}
+                                  </p>
+                                </div>
+                              )}
 
                               {googleSignedIn ? (
                                 <button
